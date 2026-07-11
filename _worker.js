@@ -1953,19 +1953,14 @@ async function SS派生会话密钥(config, masterKey, salt, usages) {
 	return crypto.subtle.importKey('raw', subKey, { name: 'AES-GCM', length: config.aesLength }, false, usages);
 }
 
-async function SSAEAD加密(cryptoKey, nonceCounter, plaintext) {
+async function SSAEAD(cryptoKey, nonceCounter, data, encrypt = true) {
 	const iv = nonceCounter.slice();
-	const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, tagLength: 128 }, cryptoKey, plaintext);
+	const result = await crypto.subtle[encrypt ? 'encrypt' : 'decrypt']({ name: 'AES-GCM', iv, tagLength: 128 }, cryptoKey, data);
 	SS递增Nonce计数器(nonceCounter);
-	return new Uint8Array(ct);
+	return new Uint8Array(result);
 }
-
-async function SSAEAD解密(cryptoKey, nonceCounter, ciphertext) {
-	const iv = nonceCounter.slice();
-	const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, tagLength: 128 }, cryptoKey, ciphertext);
-	SS递增Nonce计数器(nonceCounter);
-	return new Uint8Array(pt);
-}
+const SSAEAD加密 = (cryptoKey, nonceCounter, plaintext) => SSAEAD(cryptoKey, nonceCounter, plaintext, true);
+const SSAEAD解密 = (cryptoKey, nonceCounter, ciphertext) => SSAEAD(cryptoKey, nonceCounter, ciphertext, false);
 
 async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnWrapper, yourUUID, request = null, 反代上下文 = {}, 允许木马反代 = false, 木马反代首包数据 = null) {
 	const ctx反代IP = 反代上下文.反代IP || '';
@@ -2658,6 +2653,25 @@ async function socks5Connect(targetHost, targetPort, initialData, TCP连接, par
 	}
 }
 
+async function parseConnectResponse(readFn, connLabel, decoder) {
+	let responseBuffer = new Uint8Array(0), headerEndIndex = -1, bytesRead = 0;
+	while (headerEndIndex === -1 && bytesRead < 8192) {
+		const raw = await readFn();
+		const value = raw?.byteLength !== undefined ? raw : raw?.value;
+		const done = raw?.byteLength !== undefined ? !value : raw?.done;
+		if (done || !value) throw new Error(`${connLabel} 代理在返回 CONNECT 响应前关闭连接`);
+		responseBuffer = 拼接字节数据(responseBuffer, value);
+		bytesRead = responseBuffer.length;
+		const crlfcrlf = responseBuffer.findIndex((_, i) => i < responseBuffer.length - 3 && responseBuffer[i] === 0x0d && responseBuffer[i + 1] === 0x0a && responseBuffer[i + 2] === 0x0d && responseBuffer[i + 3] === 0x0a);
+		if (crlfcrlf !== -1) headerEndIndex = crlfcrlf + 4;
+	}
+	if (headerEndIndex === -1) throw new Error(`${connLabel} 代理 CONNECT 响应头过长或无效`);
+	const statusMatch = decoder.decode(responseBuffer.slice(0, headerEndIndex)).split('\r\n')[0].match(/HTTP\/\d\.\d\s+(\d+)/);
+	const statusCode = statusMatch ? parseInt(statusMatch[1], 10) : NaN;
+	if (!Number.isFinite(statusCode) || statusCode < 200 || statusCode >= 300) throw new Error(`Connection failed: HTTP ${statusCode}`);
+	return { responseBuffer, headerEndIndex, bytesRead };
+}
+
 async function httpConnect(targetHost, targetPort, initialData, HTTPS代理 = false, TCP连接, parsedSocks5) {
 	const { username, password, hostname, port } = parsedSocks5 || {};
 	const socket = HTTPS代理
@@ -2674,20 +2688,7 @@ async function httpConnect(targetHost, targetPort, initialData, HTTPS代理 = fa
 		await writer.write(encoder.encode(request));
 		writer.releaseLock();
 
-		let responseBuffer = new Uint8Array(0), headerEndIndex = -1, bytesRead = 0;
-		while (headerEndIndex === -1 && bytesRead < 8192) {
-			const { done, value } = await reader.read();
-			if (done || !value) throw new Error(`${HTTPS代理 ? 'HTTPS' : 'HTTP'} 代理在返回 CONNECT 响应前关闭连接`);
-			responseBuffer = new Uint8Array([...responseBuffer, ...value]);
-			bytesRead = responseBuffer.length;
-			const crlfcrlf = responseBuffer.findIndex((_, i) => i < responseBuffer.length - 3 && responseBuffer[i] === 0x0d && responseBuffer[i + 1] === 0x0a && responseBuffer[i + 2] === 0x0d && responseBuffer[i + 3] === 0x0a);
-			if (crlfcrlf !== -1) headerEndIndex = crlfcrlf + 4;
-		}
-
-		if (headerEndIndex === -1) throw new Error('代理 CONNECT 响应头过长或无效');
-		const statusMatch = decoder.decode(responseBuffer.slice(0, headerEndIndex)).split('\r\n')[0].match(/HTTP\/\d\.\d\s+(\d+)/);
-		const statusCode = statusMatch ? parseInt(statusMatch[1], 10) : NaN;
-		if (!Number.isFinite(statusCode) || statusCode < 200 || statusCode >= 300) throw new Error(`Connection failed: HTTP ${statusCode}`);
+		const { responseBuffer, headerEndIndex, bytesRead } = await parseConnectResponse(() => reader.read(), HTTPS代理 ? 'HTTPS' : 'HTTP', decoder);
 
 		reader.releaseLock();
 
@@ -2748,20 +2749,7 @@ async function httpsConnect(targetHost, targetPort, initialData, TCP连接, pars
 		const request = `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\n${auth}User-Agent: Mozilla/5.0\r\nConnection: keep-alive\r\n\r\n`;
 		await tlsSocket.write(encoder.encode(request));
 
-		let responseBuffer = new Uint8Array(0), headerEndIndex = -1, bytesRead = 0;
-		while (headerEndIndex === -1 && bytesRead < 8192) {
-			const value = await tlsSocket.read();
-			if (!value) throw new Error('HTTPS 代理在返回 CONNECT 响应前关闭连接');
-			responseBuffer = 拼接字节数据(responseBuffer, value);
-			bytesRead = responseBuffer.length;
-			const crlfcrlf = responseBuffer.findIndex((_, i) => i < responseBuffer.length - 3 && responseBuffer[i] === 0x0d && responseBuffer[i + 1] === 0x0a && responseBuffer[i + 2] === 0x0d && responseBuffer[i + 3] === 0x0a);
-			if (crlfcrlf !== -1) headerEndIndex = crlfcrlf + 4;
-		}
-
-		if (headerEndIndex === -1) throw new Error('HTTPS 代理 CONNECT 响应头过长或无效');
-		const statusMatch = decoder.decode(responseBuffer.slice(0, headerEndIndex)).split('\r\n')[0].match(/HTTP\/\d\.\d\s+(\d+)/);
-		const statusCode = statusMatch ? parseInt(statusMatch[1], 10) : NaN;
-		if (!Number.isFinite(statusCode) || statusCode < 200 || statusCode >= 300) throw new Error(`Connection failed: HTTP ${statusCode}`);
+		const { responseBuffer, headerEndIndex, bytesRead } = await parseConnectResponse(() => tlsSocket.read(), 'HTTPS', decoder);
 
 		if (有效数据长度(initialData) > 0) await tlsSocket.write(数据转Uint8Array(initialData));
 		const bufferedData = bytesRead > headerEndIndex ? responseBuffer.subarray(headerEndIndex, bytesRead) : null;
@@ -4228,48 +4216,21 @@ async function sstpConnect(proxy, targetHost, targetPort, TCP连接) {
  * @param {string} secret - 秘钥字符串（如 "KEY123"）
  * @returns {string} 经过秘钥处理的 Base64 字符串
  */
-function base64SecretEncode(plaintext, secret) {
+function base64Secret(input, secret, encode = true) {
 	const encoder = new TextEncoder();
-	const data = encoder.encode(plaintext);
 	const key = encoder.encode(secret);
-	const mixed = new Uint8Array(data.length);
-
-	for (let i = 0; i < data.length; i++) {
-		mixed[i] = data[i] ^ key[i % key.length];
-	}
-
-	// 将 Uint8Array 转换为可被 btoa 处理的字符串
+	const bytes = encode
+		? encoder.encode(input)
+		: (() => { const binary = atob(input); const result = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i++) result[i] = binary.charCodeAt(i); return result; })();
+	const mixed = new Uint8Array(bytes.length);
+	for (let i = 0; i < bytes.length; i++) mixed[i] = bytes[i] ^ key[i % key.length];
+	if (!encode) return new TextDecoder().decode(mixed);
 	let binary = '';
-	for (let i = 0; i < mixed.length; i++) {
-		binary += String.fromCharCode(mixed[i]);
-	}
+	for (let i = 0; i < mixed.length; i++) binary += String.fromCharCode(mixed[i]);
 	return btoa(binary);
 }
-
-/**
- * 带秘钥的 Base64 解码
- * @param {string} encoded - 经秘钥处理过的 Base64 字符串
- * @param {string} secret - 秘钥字符串（必须与编码时相同）
- * @returns {string} 解码后的原始明文字符串
- */
-function base64SecretDecode(encoded, secret) {
-	const binary = atob(encoded);
-	const mixed = new Uint8Array(binary.length);
-	for (let i = 0; i < binary.length; i++) {
-		mixed[i] = binary.charCodeAt(i);
-	}
-
-	const encoder = new TextEncoder();
-	const key = encoder.encode(secret);
-	const data = new Uint8Array(mixed.length);
-
-	for (let i = 0; i < mixed.length; i++) {
-		data[i] = mixed[i] ^ key[i % key.length];
-	}
-
-	const decoder = new TextDecoder();
-	return decoder.decode(data);
-}
+const base64SecretEncode = (plaintext, secret) => base64Secret(plaintext, secret, true);
+const base64SecretDecode = (encoded, secret) => base64Secret(encoded, secret, false);
 
 function 获取传输协议配置(配置 = {}) {
 	const 是gRPC = 配置.传输协议 === 'grpc';
