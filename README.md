@@ -160,6 +160,14 @@
    /http://user:password@127.0.0.1:8080 (默认激活全局SOCKS5)
    ```
 
+- 指定 `VLESS + REALITY` 链式代理
+   ```url
+   /?vless=<URL编码后的vless://链接>&globalproxy
+   ```
+   当前支持 `security=reality`、`type=tcp`、`encryption=none` 且不设置 `flow`。`xtls-rprx-vision` 尚未支持，会直接返回错误。
+
+   优选订阅节点备注也可追加 `$vless://UUID@服务器:端口?security=reality&type=tcp&encryption=none&sni=域名&pbk=公钥&sid=短ID`，生成的节点会通过该 REALITY 节点进行链式转发。
+
 - 指定 `Trojan fallback` 案例（由于使用场景为自建对接, 仅 Trojan 入站，fallback 服务需为同密码、非 WebSocket、非 TLS. 此时 UDP 透传给 fallback, 性能优秀, 功能完整）
    ```url
    /trojan=1.1.1.1:1234

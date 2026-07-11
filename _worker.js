@@ -135,13 +135,13 @@ export default {
 						}
 						return new Response(JSON.stringify({ success: false, data: [] }, null, 2), { status: 403, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 					} else if (访问路径 === 'admin/check') {// 代理检查
-						const 代理协议 = ['socks5', 'http', 'https', 'turn', 'sstp'].find(类型 => url.searchParams.has(类型)) || null;
+						const 代理协议 = ['socks5', 'http', 'https', 'vless', 'turn', 'sstp'].find(类型 => url.searchParams.has(类型)) || null;
 						if (!代理协议) return new Response(JSON.stringify({ error: '缺少代理参数' }), { status: 400, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 						const 代理参数 = url.searchParams.get(代理协议);
 						const startTime = Date.now();
 						let 检测代理响应;
 						try {
-							const checkParsed = await 获取SOCKS5账号(代理参数, 获取代理默认端口(代理协议));
+							const checkParsed = 代理协议 === 'vless' ? 解析VlessReality链接(代理参数) : await 获取SOCKS5账号(代理参数, 获取代理默认端口(代理协议));
 							const { username, password, hostname, port } = checkParsed;
 							const 完整代理参数 = username && password ? `${username}:${password}@${hostname}:${port}` : `${hostname}:${port}`;
 							try {
@@ -149,7 +149,9 @@ export default {
 								const TCP连接 = 创建请求TCP连接器(request);
 								let tcpSocket = null, tlsSocket = null;
 								try {
-									tcpSocket = 代理协议 === 'socks5'
+									tcpSocket = 代理协议 === 'vless'
+										? await vlessRealityConnect(检测主机, 检测端口, new Uint8Array(0), TCP连接, checkParsed)
+										: 代理协议 === 'socks5'
 										? await socks5Connect(检测主机, 检测端口, new Uint8Array(0), TCP连接, checkParsed)
 										: 代理协议 === 'turn'
 											? await turnConnect(checkParsed, 检测主机, 检测端口, TCP连接)
@@ -423,11 +425,16 @@ export default {
 
 								let 完整节点路径 = config_JSON.完整节点路径;
 
-								const 链式代理匹配 = 节点备注.match(/\$(socks5|http|https|turn|sstp):\/\/([^#\s]+)/i);
+								const 链式代理匹配 = 节点备注.match(/\$(socks5|http|https|vless|turn|sstp):\/\/([^#\s]+)/i);
 								if (链式代理匹配) {
 									try {
 										const 代理协议 = 链式代理匹配[1].toLowerCase(), 代理参数 = 链式代理匹配[2];
-										const 链式代理数据 = { type: 代理协议, ...获取SOCKS5账号(代理参数, 获取代理默认端口(代理协议)) };
+										const 代理配置 = 代理协议 === 'vless' ? 解析VlessReality链接(`vless://${代理参数}`) : 获取SOCKS5账号(代理参数, 获取代理默认端口(代理协议));
+										const 链式代理数据 = { type: 代理协议, ...代理配置 };
+										if (代理协议 === 'vless') {
+											链式代理数据.publicKey = Array.from(代理配置.publicKey);
+											链式代理数据.shortId = Array.from(代理配置.shortId);
+										}
 										完整节点路径 = `/video/${base64SecretEncode(JSON.stringify(链式代理数据), userID) + (config_JSON.启用0RTT ? '?ed=2560' : '')}`;
 										节点备注 = 节点备注.replace(链式代理匹配[0], '').trim() || 节点地址;
 									} catch (error) {
@@ -2141,6 +2148,9 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 				newSocket = isIPHostname(ctx代理参数.hostname)
 					? await httpsConnect(host, portNum, 本次首包数据, TCP连接, ctx代理参数)
 					: await httpConnect(host, portNum, 本次首包数据, true, TCP连接, ctx代理参数);
+			} else if (ctx代理类型 === 'vless') {
+				log(`[VLESS+REALITY代理] 代理到: ${host}:${portNum}`);
+				newSocket = await vlessRealityConnect(host, portNum, 本次首包数据, TCP连接, ctx代理参数);
 			} else if (ctx代理类型 === 'turn') {
 				log(`[TURN代理] 代理到: ${host}:${portNum}`);
 				newSocket = await turnConnect(ctx代理参数, host, portNum, TCP连接);
@@ -2180,11 +2190,11 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 	remoteConnWrapper.retryConnect = async () => connecttoPry(!已通过代理发送首包);
 
 	if (ctx代理类型 && (ctx代理全局 || SOCKS5白名单.some(p => new RegExp(`^${p.replace(/\*/g, '.*')}$`, 'i').test(host)))) {
-		log(`[TCP转发] 启用 SOCKS5/HTTP/HTTPS/TURN/SSTP 全局代理`);
+		log(`[TCP转发] 启用 SOCKS5/HTTP/HTTPS/VLESS+REALITY/TURN/SSTP 全局代理`);
 		try {
 			await connecttoPry();
 		} catch (err) {
-			log(`[TCP转发] SOCKS5/HTTP/HTTPS/TURN/SSTP 代理连接失败: ${err.message}`);
+			log(`[TCP转发] SOCKS5/HTTP/HTTPS/VLESS+REALITY/TURN/SSTP 代理连接失败: ${err.message}`);
 			throw err;
 		}
 	} else {
@@ -2610,6 +2620,119 @@ function isSpeedTestSite(hostname) {
 }
 
 ///////////////////////////////////////////////////////SOCKS5/HTTP函数///////////////////////////////////////////////
+function base64UrlToBytes(value) {
+	const normalized = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+	const binary = atob(normalized + '='.repeat((4 - normalized.length % 4) % 4));
+	return Uint8Array.from(binary, char => char.charCodeAt(0));
+}
+
+function hexToPaddedBytes(value, length) {
+	const hex = String(value || '');
+	if (hex.length > length * 2 || hex.length % 2 || !/^[0-9a-f]*$/i.test(hex)) throw new Error('无效的 REALITY shortId');
+	const bytes = new Uint8Array(length);
+	for (let i = 0; i < hex.length; i += 2) bytes[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+	return bytes;
+}
+
+function 解析VlessReality链接(value) {
+	const text = String(value || '').trim();
+	const url = new URL(/^vless:\/\//i.test(text) ? text : `vless://${text}`);
+	const uuid = decodeURIComponent(url.username), flow = url.searchParams.get('flow') || '';
+	if (!获取UUID字节(uuid)) throw new Error('无效的 VLESS UUID');
+	if ((url.searchParams.get('security') || '').toLowerCase() !== 'reality') throw new Error('VLESS 链式代理仅支持 security=reality');
+	if (!['', 'tcp'].includes((url.searchParams.get('type') || '').toLowerCase())) throw new Error('VLESS+REALITY 链式代理仅支持 type=tcp');
+	if (flow) throw new Error('VLESS+REALITY 链式代理暂不支持 flow/XTLS Vision');
+	if (!['', 'none'].includes((url.searchParams.get('encryption') || '').toLowerCase())) throw new Error('VLESS 链式代理仅支持 encryption=none');
+	const publicKey = base64UrlToBytes(url.searchParams.get('pbk'));
+	if (publicKey.length !== 32) throw new Error('无效的 REALITY publicKey');
+	const hostname = stripIPv6Brackets(url.hostname), port = Number(url.port || 443), serverName = url.searchParams.get('sni') || '';
+	if (!hostname || !Number.isInteger(port) || port < 1 || port > 65535 || !serverName) throw new Error('VLESS+REALITY 链接缺少有效的地址、端口或 SNI');
+	return { uuid, hostname, port, serverName, publicKey, shortId: hexToPaddedBytes(url.searchParams.get('sid'), 8) };
+}
+
+function ipv6ToBytes(value) {
+	const parts = stripIPv6Brackets(value).split('::');
+	if (parts.length > 2) throw new Error('无效的 IPv6 地址');
+	const parsePart = part => {
+		const segments = part ? part.split(':') : [];
+		if (segments.at(-1)?.includes('.')) {
+			const ipv4 = segments.pop();
+			if (!isIPv4(ipv4)) throw new Error('无效的 IPv4-mapped IPv6 地址');
+			const bytes = ipv4.split('.').map(Number);
+			segments.push(((bytes[0] << 8) | bytes[1]).toString(16), ((bytes[2] << 8) | bytes[3]).toString(16));
+		}
+		return segments.map(segment => parseInt(segment, 16));
+	};
+	const left = parsePart(parts[0]), right = parsePart(parts[1] || '');
+	if ([...left, ...right].some(segment => !Number.isInteger(segment) || segment < 0 || segment > 0xffff)) throw new Error('无效的 IPv6 地址');
+	const missing = 8 - left.length - right.length;
+	if ((parts.length === 1 && missing !== 0) || missing < 0) throw new Error('无效的 IPv6 地址');
+	const segments = [...left, ...new Array(missing).fill(0), ...right], bytes = new Uint8Array(16);
+	segments.forEach((segment, index) => { bytes[index * 2] = segment >> 8; bytes[index * 2 + 1] = segment & 0xff });
+	return bytes;
+}
+
+function 构建Vless请求头(uuid, targetHost, targetPort) {
+	const uuidBytes = 获取UUID字节(uuid);
+	if (!uuidBytes || !Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) throw new Error('无效的 VLESS 目标地址或端口');
+	let addressType, addressBytes;
+	if (isIPv4(targetHost)) {
+		addressType = 1;
+		addressBytes = Uint8Array.from(targetHost.split('.'), Number);
+	} else if (stripIPv6Brackets(targetHost).includes(':')) {
+		addressType = 3;
+		addressBytes = ipv6ToBytes(targetHost);
+	} else {
+		addressType = 2;
+		const domain = textEncoder.encode(targetHost);
+		if (!domain.length || domain.length > 255) throw new Error('无效的 VLESS 目标域名');
+		addressBytes = concatBytes([domain.length], domain);
+	}
+	return concatBytes([0], uuidBytes, [0, 1], uint16be(targetPort), [addressType], addressBytes);
+}
+
+async function vlessRealityConnect(targetHost, targetPort, initialData, TCP连接, proxy) {
+	const socket = TCP连接({ hostname: proxy.hostname, port: proxy.port });
+	let tlsSocket = null;
+	try {
+		await withTimeout(socket.opened, CONNECT_TIMEOUT_MS, 'VLESS+REALITY server connection timed out');
+		tlsSocket = new TlsClient(socket, { serverName: proxy.serverName, tls13: true, tls12: false, reality: { publicKey: proxy.publicKey, shortId: proxy.shortId } });
+		await tlsSocket.handshake();
+		await tlsSocket.write(concatBytes(构建Vless请求头(proxy.uuid, targetHost, targetPort), 有效数据长度(initialData) ? 数据转Uint8Array(initialData) : EMPTY_BYTES));
+
+		let closedSettled = false, resolveClosed, rejectClosed;
+		const closed = new Promise((resolve, reject) => { resolveClosed = resolve; rejectClosed = reject });
+		const settleClosed = (settle, value) => { if (!closedSettled) { closedSettled = true; settle(value) } };
+		const close = () => { try { tlsSocket.close() } catch (e) { } settleClosed(resolveClosed) };
+		const readable = new ReadableStream({
+			async start(controller) {
+				let responseBuffer = EMPTY_BYTES, responseHeaderRead = false;
+				try {
+					while (true) {
+						let data = await tlsSocket.read();
+						if (!data) break;
+						if (!responseHeaderRead) {
+							responseBuffer = responseBuffer.length ? concatBytes(responseBuffer, data) : data;
+							if (responseBuffer.length < 2 || responseBuffer.length < 2 + responseBuffer[1]) continue;
+							if (responseBuffer[0] !== 0) throw new Error(`Invalid VLESS response version: ${responseBuffer[0]}`);
+							data = responseBuffer.subarray(2 + responseBuffer[1]);
+							responseHeaderRead = true;
+						}
+						if (data.length) controller.enqueue(data);
+					}
+					controller.close(); settleClosed(resolveClosed)
+				} catch (error) { controller.error(error); settleClosed(rejectClosed, error) }
+			},
+			cancel: close
+		});
+		const writable = new WritableStream({ write: chunk => tlsSocket.write(数据转Uint8Array(chunk)), close, abort: close });
+		return { readable, writable, closed, close };
+	} catch (error) {
+		try { tlsSocket ? tlsSocket.close() : socket.close() } catch (e) { }
+		throw error;
+	}
+}
+
 async function socks5Connect(targetHost, targetPort, initialData, TCP连接, parsedSocks5) {
 	const { username, password, hostname, port } = parsedSocks5 || {};
 	const socket = TCP连接({ hostname, port }), writer = socket.writable.getWriter(), reader = socket.readable.getReader();
@@ -2829,7 +2952,7 @@ const CIPHER_SUITES_BY_ID = new Map([
 	[52393, { id: 52393, keyLen: 32, ivLen: 12, hash: "SHA-256", kex: "ECDHE", chacha: !0 }]
 ]);
 const GROUPS_BY_ID = new Map([[29, "X25519"], [23, "P-256"]]);
-const SUPPORTED_SIGNATURE_ALGORITHMS = [2052, 2053, 2054, 1025, 1281, 1537, 1027, 1283, 1539];
+const SUPPORTED_SIGNATURE_ALGORITHMS = [2052, 2053, 2054, 2055, 1025, 1281, 1537, 1027, 1283, 1539];
 
 const tlsBytes = (...parts) => {
 	const flattenBytes = values => values.flatMap(value => value instanceof Uint8Array ? [...value] : Array.isArray(value) ? flattenBytes(value) : "number" == typeof value ? [value] : []);
@@ -3098,6 +3221,46 @@ function extractLeafCertificate(body, hasContext = 0) {
 	return offset += 3, certificateLength ? body.slice(offset, offset + certificateLength) : null
 }
 
+function readDerElement(bytes, offset = 0) {
+	if (offset + 2 > bytes.length) throw new Error("Invalid DER element");
+	const tag = bytes[offset++];
+	let length = bytes[offset++];
+	if (length & 0x80) {
+		const lengthBytes = length & 0x7f;
+		if (!lengthBytes || lengthBytes > 4 || offset + lengthBytes > bytes.length) throw new Error("Invalid DER length");
+		length = 0;
+		for (let i = 0; i < lengthBytes; i++) length = length << 8 | bytes[offset++];
+	}
+	const end = offset + length;
+	if (end > bytes.length) throw new Error("Truncated DER element");
+	return { tag, start: offset, end, next: end };
+}
+
+function readDerChildren(bytes, element) {
+	const children = [];
+	for (let offset = element.start; offset < element.end;) {
+		const child = readDerElement(bytes, offset);
+		children.push(child);
+		offset = child.next;
+	}
+	return children;
+}
+
+function parseRealityCertificate(certificate) {
+	const root = readDerElement(certificate);
+	if (root.tag !== 0x30 || root.next !== certificate.length) throw new Error("Invalid REALITY certificate");
+	const certificateParts = readDerChildren(certificate, root);
+	if (certificateParts.length < 3 || certificateParts[0].tag !== 0x30 || certificateParts[2].tag !== 0x03) throw new Error("Invalid REALITY certificate structure");
+	const tbsParts = readDerChildren(certificate, certificateParts[0]);
+	const subjectPublicKeyInfo = tbsParts[tbsParts[0]?.tag === 0xa0 ? 6 : 5];
+	if (!subjectPublicKeyInfo || subjectPublicKeyInfo.tag !== 0x30) throw new Error("Missing REALITY certificate public key");
+	const publicKeyBitString = readDerChildren(certificate, subjectPublicKeyInfo)[1];
+	const publicKey = publicKeyBitString?.tag === 0x03 ? certificate.slice(publicKeyBitString.start + 1, publicKeyBitString.end) : null;
+	const signature = certificate.slice(certificateParts[2].start + 1, certificateParts[2].end);
+	if (publicKey?.length !== 32 || signature.length !== 64) throw new Error("Invalid REALITY certificate key or signature");
+	return { publicKey, signature };
+}
+
 function parseEncryptedExtensions(body) {
 	const parsed = { alpn: null };
 	let offset = 2;
@@ -3115,7 +3278,7 @@ function parseEncryptedExtensions(body) {
 	return parsed
 }
 
-function buildClientHello(clientRandom, serverName, keyShares, { tls13: enableTls13 = !0, tls12: enableTls12 = !0, alpn = null, chacha = !0 } = {}) {
+function buildClientHello(clientRandom, serverName, keyShares, { tls13: enableTls13 = !0, tls12: enableTls12 = !0, alpn = null, chacha = !0, sessionId = EMPTY_BYTES } = {}) {
 	const cipherIds = [];
 	enableTls13 && cipherIds.push(4865, 4866, ...(chacha ? [4867] : [])), enableTls12 && cipherIds.push(49199, 49200, 49195, 49196, ...(chacha ? [52392, 52393] : []));
 	const cipherBytes = tlsBytes(...cipherIds.flatMap(uint16be)),
@@ -3145,7 +3308,7 @@ function buildClientHello(clientRandom, serverName, keyShares, { tls13: enableTl
 		extensions.push(tlsBytes(uint16be(EXT_KEY_SHARE), uint16be(keyShareBytes.length + 2), uint16be(keyShareBytes.length), keyShareBytes))
 	}
 	const extensionsBytes = concatBytes(...extensions);
-	return buildHandshakeMessage(HANDSHAKE_TYPE_CLIENT_HELLO, tlsBytes(uint16be(TLS_VERSION_12), clientRandom, 0, uint16be(cipherBytes.length), cipherBytes, 1, 0, uint16be(extensionsBytes.length), extensionsBytes))
+	return buildHandshakeMessage(HANDSHAKE_TYPE_CLIENT_HELLO, tlsBytes(uint16be(TLS_VERSION_12), clientRandom, sessionId.length, sessionId, uint16be(cipherBytes.length), cipherBytes, 1, 0, uint16be(extensionsBytes.length), extensionsBytes))
 }
 const uint64be = sequenceNumber => { const bytes = new Uint8Array(8); return new DataView(bytes.buffer).setBigUint64(0, sequenceNumber, !1), bytes },
 	xorSequenceIntoIv = (initializationVector, sequenceNumber) => {
@@ -3157,8 +3320,10 @@ const uint64be = sequenceNumber => { const bytes = new Uint8Array(8); return new
 	deriveTrafficKeys = (hash, secret, keyLen, ivLen) => Promise.all([hkdfExpandLabel(hash, secret, "key", EMPTY_BYTES, keyLen), hkdfExpandLabel(hash, secret, "iv", EMPTY_BYTES, ivLen)]);
 class TlsClient {
 	constructor(socket, options = {}) {
-		if (this.socket = socket, this.serverName = options.serverName || "", this.supportTls13 = !1 !== options.tls13, this.supportTls12 = !1 !== options.tls12, !this.supportTls13 && !this.supportTls12) throw new Error("At least one TLS version must be enabled");
-		this.alpnProtocols = Array.isArray(options.alpn) ? options.alpn : options.alpn ? [options.alpn] : null, this.allowChacha = options.allowChacha !== false, this.timeout = options.timeout ?? 3e4, this.clientRandom = randomBytes(32), this.serverRandom = null, this.handshakeChunks = [], this.handshakeComplete = !1, this.negotiatedAlpn = null, this.cipherSuite = null, this.cipherConfig = null, this.isTls13 = !1, this.masterSecret = null, this.handshakeSecret = null, this.clientWriteKey = null, this.serverWriteKey = null, this.clientWriteIv = null, this.serverWriteIv = null, this.clientHandshakeKey = null, this.serverHandshakeKey = null, this.clientHandshakeIv = null, this.serverHandshakeIv = null, this.clientAppKey = null, this.serverAppKey = null, this.clientAppIv = null, this.serverAppIv = null, this.clientWriteCryptoKey = null, this.serverWriteCryptoKey = null, this.clientHandshakeCryptoKey = null, this.serverHandshakeCryptoKey = null, this.clientAppCryptoKey = null, this.serverAppCryptoKey = null, this.clientSeqNum = 0n, this.serverSeqNum = 0n, this.recordParser = new TlsRecordParser, this.handshakeParser = new TlsHandshakeParser, this.keyPairs = new Map, this.ecdhKeyPair = null, this.sawCert = !1
+		this.socket = socket, this.serverName = options.serverName || "", this.reality = options.reality || null;
+		this.supportTls13 = this.reality ? true : !1 !== options.tls13, this.supportTls12 = this.reality ? false : !1 !== options.tls12;
+		if (!this.supportTls13 && !this.supportTls12) throw new Error("At least one TLS version must be enabled");
+		this.alpnProtocols = Array.isArray(options.alpn) ? options.alpn : options.alpn ? [options.alpn] : null, this.allowChacha = options.allowChacha !== false, this.timeout = options.timeout ?? 3e4, this.clientRandom = randomBytes(32), this.serverRandom = null, this.handshakeChunks = [], this.handshakeComplete = !1, this.negotiatedAlpn = null, this.cipherSuite = null, this.cipherConfig = null, this.isTls13 = !1, this.masterSecret = null, this.handshakeSecret = null, this.clientWriteKey = null, this.serverWriteKey = null, this.clientWriteIv = null, this.serverWriteIv = null, this.clientHandshakeKey = null, this.serverHandshakeKey = null, this.clientHandshakeIv = null, this.serverHandshakeIv = null, this.clientAppKey = null, this.serverAppKey = null, this.clientAppIv = null, this.serverAppIv = null, this.clientWriteCryptoKey = null, this.serverWriteCryptoKey = null, this.clientHandshakeCryptoKey = null, this.serverHandshakeCryptoKey = null, this.clientAppCryptoKey = null, this.serverAppCryptoKey = null, this.clientSeqNum = 0n, this.serverSeqNum = 0n, this.recordParser = new TlsRecordParser, this.handshakeParser = new TlsHandshakeParser, this.keyPairs = new Map, this.ecdhKeyPair = null, this.sawCert = !1, this.realityAuthKey = null, this.realityPublicKey = null, this.realityVerified = !1
 	}
 	recordHandshake(chunk) { this.handshakeChunks.push(chunk) }
 	transcript() { return 1 === this.handshakeChunks.length ? this.handshakeChunks[0] : concatBytes(...this.handshakeChunks) }
@@ -3189,22 +3354,57 @@ class TlsClient {
 			}
 		}), closedError)
 	}
-	async acceptCertificate(certificate) { if (!certificate?.length) throw new Error("Empty certificate"); this.sawCert = !0 }
+	async acceptCertificate(certificate) {
+		if (!certificate?.length) throw new Error("Empty certificate");
+		if (this.reality) {
+			const { publicKey, signature } = parseRealityCertificate(certificate);
+			const expectedSignature = await hmac("SHA-512", this.realityAuthKey, publicKey);
+			if (!constantTimeEqual(expectedSignature, signature)) throw new Error("REALITY certificate verification failed");
+			this.realityPublicKey = publicKey;
+			this.realityVerified = !0
+		}
+		this.sawCert = !0
+	}
+	async verifyCertificateVerify(body, hashName) {
+		if (!this.reality) return;
+		if (!this.realityPublicKey || body.length < 68 || readUint16(body, 0) !== 0x0807) throw new Error("Invalid REALITY CertificateVerify");
+		const signatureLength = readUint16(body, 2), signature = body.slice(4, 4 + signatureLength);
+		if (signatureLength !== 64 || signature.length !== 64) throw new Error("Invalid REALITY CertificateVerify signature");
+		const transcriptHash = await digestBytes(hashName, this.transcript());
+		const signedContent = concatBytes(new Uint8Array(64).fill(0x20), textEncoder.encode("TLS 1.3, server CertificateVerify"), [0], transcriptHash);
+		const publicKey = await crypto.subtle.importKey("raw", this.realityPublicKey, { name: "Ed25519" }, false, ["verify"]);
+		if (!await crypto.subtle.verify({ name: "Ed25519" }, publicKey, signature, signedContent)) throw new Error("REALITY CertificateVerify verification failed")
+	}
 	async handshake() {
 		const [p256Share, x25519Share] = await Promise.all([generateKeyShare("P-256"), generateKeyShare("X25519")]);
 		this.keyPairs = new Map([[23, p256Share], [29, x25519Share]]), this.ecdhKeyPair = p256Share.keyPair;
 		const reader = this.socket.readable.getReader(),
 			writer = this.socket.writable.getWriter();
 		try {
-			const clientHello = buildClientHello(this.clientRandom, this.serverName, { x25519: x25519Share.publicKeyRaw, p256: p256Share.publicKeyRaw }, { tls13: this.supportTls13, tls12: this.supportTls12, alpn: this.alpnProtocols, chacha: this.allowChacha });
+			const sessionId = this.reality ? new Uint8Array(32) : EMPTY_BYTES;
+			const clientHello = buildClientHello(this.clientRandom, this.serverName, { x25519: x25519Share.publicKeyRaw, p256: p256Share.publicKeyRaw }, { tls13: this.supportTls13, tls12: this.supportTls12, alpn: this.alpnProtocols, chacha: this.allowChacha, sessionId });
+			if (this.reality) {
+				const sharedSecret = await deriveSharedSecret(x25519Share.keyPair.privateKey, this.reality.publicKey, "X25519");
+				const hkdfKey = await crypto.subtle.importKey("raw", sharedSecret, "HKDF", false, ["deriveBits"]);
+				this.realityAuthKey = new Uint8Array(await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: this.clientRandom.slice(0, 20), info: textEncoder.encode("REALITY") }, hkdfKey, 256));
+				const plaintext = new Uint8Array(16), view = new DataView(plaintext.buffer);
+				plaintext.set([26, 7, 11, 0]), view.setUint32(4, Math.floor(Date.now() / 1000)), plaintext.set(this.reality.shortId, 8);
+				const cryptoKey = await importAesGcmKey(this.realityAuthKey, ["encrypt"]);
+				const encryptedSessionId = await aesGcmEncryptWithKey(cryptoKey, this.clientRandom.slice(20), plaintext, clientHello);
+				if (encryptedSessionId.length !== 32) throw new Error("Invalid REALITY session ID");
+				clientHello.set(encryptedSessionId, 39)
+			}
 			this.recordHandshake(clientHello), await writer.write(buildTlsRecord(CONTENT_TYPE_HANDSHAKE, clientHello, TLS_VERSION_10));
 			const serverHello = await this.receiveServerHello(reader);
 			if (serverHello.isHRR) throw new Error("HelloRetryRequest is not supported by TLSClientMini");
+			if (this.reality && (!serverHello.isTls13 || serverHello.keyShare?.group !== 29)) throw new Error("REALITY requires TLS 1.3 with X25519");
 			if (serverHello.keyShare?.group && this.keyPairs.has(serverHello.keyShare.group)) {
 				const selectedKeyPair = this.keyPairs.get(serverHello.keyShare.group);
 				this.ecdhKeyPair = selectedKeyPair.keyPair
 			}
-			serverHello.isTls13 ? await this.handshakeTls13(reader, writer, serverHello) : await this.handshakeTls12(reader, writer), this.handshakeComplete = !0
+			serverHello.isTls13 ? await this.handshakeTls13(reader, writer, serverHello) : await this.handshakeTls12(reader, writer);
+			if (this.reality && !this.realityVerified) throw new Error("REALITY server authentication failed");
+			this.handshakeComplete = !0
 		} finally {
 			reader.releaseLock(), writer.releaseLock()
 		}
@@ -3239,7 +3439,7 @@ class TlsClient {
 			switch (message.type) {
 				case HANDSHAKE_TYPE_CERTIFICATE: {
 					this.recordHandshake(message.raw);
-					const certificate = extractLeafCertificate(message.body, 1);
+					const certificate = extractLeafCertificate(message.body);
 					if (!certificate) throw new Error("Missing TLS 1.2 certificate");
 					await this.acceptCertificate(certificate);
 					break
@@ -3318,7 +3518,7 @@ class TlsClient {
 					break
 				}
 				case HANDSHAKE_TYPE_CERTIFICATE: {
-					const certificate = extractLeafCertificate(message.body);
+					const certificate = extractLeafCertificate(message.body, 1);
 					if (!certificate) throw new Error("Missing TLS 1.3 certificate");
 					await this.acceptCertificate(certificate), this.recordHandshake(message.raw);
 					break
@@ -3326,6 +3526,7 @@ class TlsClient {
 				case HANDSHAKE_TYPE_CERTIFICATE_REQUEST:
 					throw new Error("Client certificate is not supported");
 				case HANDSHAKE_TYPE_CERTIFICATE_VERIFY:
+					await this.verifyCertificateVerify(message.body, hashName);
 					this.recordHandshake(message.raw);
 					break;
 				case HANDSHAKE_TYPE_FINISHED: {
@@ -5511,12 +5712,9 @@ async function 反代参数获取(url, uuid, 默认反代IP = '', 默认反代�
 			启用反代兜底 = false;
 			启用SOCKS5全局反代 = true;
 			启用SOCKS5反代 = String(type).toLowerCase();
-			parsedSocks5Address = {
-				username: 链式代理地址.username,
-				password: 链式代理地址.password,
-				hostname: 链式代理地址.hostname,
-				port: Number(链式代理地址.port)
-			};
+			parsedSocks5Address = String(type).toLowerCase() === 'vless'
+				? { ...链式代理地址, publicKey: new Uint8Array(链式代理地址.publicKey), shortId: new Uint8Array(链式代理地址.shortId), port: Number(链式代理地址.port) }
+				: { username: 链式代理地址.username, password: 链式代理地址.password, hostname: 链式代理地址.hostname, port: Number(链式代理地址.port) };
 			if (isNaN(parsedSocks5Address.port)) throw new Error('链式代理端口无效');
 			保存快照();
 			return 反代上下文;
@@ -5525,19 +5723,20 @@ async function 反代参数获取(url, uuid, 默认反代IP = '', 默认反代�
 		}
 	}
 
-	我的SOCKS5账号 = searchParams.get('socks5') || searchParams.get('http') || searchParams.get('https') || searchParams.get('turn') || searchParams.get('sstp') || null;
+	我的SOCKS5账号 = searchParams.get('socks5') || searchParams.get('http') || searchParams.get('https') || searchParams.get('vless') || searchParams.get('turn') || searchParams.get('sstp') || null;
 	启用SOCKS5全局反代 = searchParams.has('globalproxy');
 	if (searchParams.get('socks5')) 启用SOCKS5反代 = 'socks5';
 	else if (searchParams.get('http')) 启用SOCKS5反代 = 'http';
 	else if (searchParams.get('https')) 启用SOCKS5反代 = 'https';
+	else if (searchParams.get('vless')) 启用SOCKS5反代 = 'vless';
 	else if (searchParams.get('turn')) 启用SOCKS5反代 = 'turn';
 	else if (searchParams.get('sstp')) 启用SOCKS5反代 = 'sstp';
 
 	const 解析代理URL = (值, 强制全局 = true) => {
-		const 匹配 = /^(socks5|http|https|turn|sstp):\/\/(.+)$/i.exec(值 || '');
+		const 匹配 = /^(socks5|http|https|vless|turn|sstp):\/\/(.+)$/i.exec(值 || '');
 		if (!匹配) return false;
 		启用SOCKS5反代 = 匹配[1].toLowerCase();
-		我的SOCKS5账号 = 匹配[2].split('/')[0];
+		我的SOCKS5账号 = 启用SOCKS5反代 === 'vless' ? 值 : 匹配[2].split('/')[0];
 		if (强制全局) 启用SOCKS5全局反代 = true;
 		return true;
 	};
@@ -5605,10 +5804,11 @@ async function 反代参数获取(url, uuid, 默认反代IP = '', 默认反代�
 	}
 
 	try {
-		parsedSocks5Address = await 获取SOCKS5账号(我的SOCKS5账号, 获取代理默认端口(启用SOCKS5反代));
+		parsedSocks5Address = 启用SOCKS5反代 === 'vless' ? 解析VlessReality链接(我的SOCKS5账号) : await 获取SOCKS5账号(我的SOCKS5账号, 获取代理默认端口(启用SOCKS5反代));
 		if (searchParams.get('socks5')) 启用SOCKS5反代 = 'socks5';
 		else if (searchParams.get('http')) 启用SOCKS5反代 = 'http';
 		else if (searchParams.get('https')) 启用SOCKS5反代 = 'https';
+		else if (searchParams.get('vless')) 启用SOCKS5反代 = 'vless';
 		else if (searchParams.get('turn')) 启用SOCKS5反代 = 'turn';
 		else if (searchParams.get('sstp')) 启用SOCKS5反代 = 'sstp';
 		else 启用SOCKS5反代 = 启用SOCKS5反代 || 'socks5';
@@ -5620,7 +5820,7 @@ async function 反代参数获取(url, uuid, 默认反代IP = '', 默认反代�
 	return 反代上下文;
 }
 
-const 反代协议默认端口 = { socks5: 1080, http: 80, https: 443, turn: 3478, sstp: 443 };
+const 反代协议默认端口 = { socks5: 1080, http: 80, https: 443, vless: 443, turn: 3478, sstp: 443 };
 function 获取代理默认端口(类型) {
 	return 反代协议默认端口[String(类型 || '').toLowerCase()] || 80;
 }
