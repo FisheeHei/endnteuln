@@ -1,24 +1,31 @@
-name: Sync fork with upstream
+name: Mirror FisheeHei edgetunnel
 
 on:
   schedule:
-    - cron: '0 0 */5 * *'
-      timezone: "Asia/Shanghai"
+    - cron: '0 0 */3 * *'
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  sync:
+  mirror:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: Divinci-AI/sync-fork-action@v1
-        with:
-          upstream_repository: cmliu/edgetunnel
-          upstream_branch: main
-          target_branch: main
+      - name: Mirror upstream main
+        run: |
+          cp .github/workflows/auto-sync.yml "$RUNNER_TEMP/auto-sync.yml"
+          git fetch --no-tags https://github.com/FisheeHei/edgetunnel.git main
+          git checkout -B main FETCH_HEAD
+          mkdir -p .github/workflows
+          cp "$RUNNER_TEMP/auto-sync.yml" .github/workflows/auto-sync.yml
+          git rm --ignore-unmatch .github/workflows/sync.yml
+          git add .github/workflows/auto-sync.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git diff --cached --quiet || git commit -m "chore: preserve mirror workflow"
+          git push origin main --force
